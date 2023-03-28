@@ -48,10 +48,10 @@ func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error)
 }
 func readTsdb(path string, blockID string) error {
 	db, _, err := openBlock(path, blockID)
-	defer db.Close()
 	if err != nil {
 		return err
 	}
+	defer db.Close()
 	defer func() {
 		err = tsdb_errors.NewMulti(err, db.Close()).Err()
 	}()
@@ -65,8 +65,6 @@ func readTsdb(path string, blockID string) error {
 
 	file, err := os.Create("../output_tsdb.parquet")
 	if err != nil {
-
-		fmt.Println("error at p6")
 		return err
 	}
 
@@ -83,13 +81,12 @@ func readTsdb(path string, blockID string) error {
 				Time:  ts,
 				Label: lbs,
 			}
-			fmt.Println(tsdb)
+			//fmt.Println(tsdb)
 			if err := writer.Write(tsdb); err != nil {
 				return err
 			}
 		}
 		if it.Err() != nil {
-			fmt.Println("error at p77")
 			return sset.Err()
 		}
 	}
@@ -100,7 +97,7 @@ func main() {
 	//fname := "./hello.go"
 	//path, err := filepath.Abs(fname)
 	path, err := os.Getwd()
-	fmt.Println(path)
+	//fmt.Println(path)
 	if err != nil {
 		log.Fatal(err)
 	}
