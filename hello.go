@@ -7,7 +7,11 @@ import (
 	"math"
 	"os"
 
-	"github.com/segmentio/parquet-go"
+	parquet1 "github.com/segmentio/parquet-go"
+	"github.com/xitongsys/parquet-go-source/local"
+	"github.com/xitongsys/parquet-go/parquet"
+	"github.com/xitongsys/parquet-go/reader"
+	"github.com/xitongsys/parquet-go/writer"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb"
@@ -16,11 +20,80 @@ import (
 )
 
 type TSDB struct {
-	Value float64 `parquet:"value"`
-	Time  int64   `parquet:"time"`
-	Label string  `parquet:"label"`
+	Value float64 `parquet:"name=value"`
+	Time  int64   `parquet:"name=time"`
+	Label string  `parquet:"name=label"`
 }
 
+func SlicesEqual(a, b []*TSDB) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		} else {
+			fmt.Println(v, b[i])
+		}
+	}
+	return true
+}
+func generateParquet(block []*TSDB) error {
+	// using xitongsys library
+	log.Println("generating parquet file")
+	fw, err := local.NewLocalFileWriter("output.parquet")
+	fmt.Println(len(block))
+	if err != nil {
+		return err
+	}
+	//parameters: writer, type of struct, size
+	pw, err := writer.NewParquetWriter(fw, new(TSDB), int64(len(block)))
+	if err != nil {
+		return err
+	}
+	//compression type
+	pw.CompressionType = parquet.CompressionCodec_GZIP
+	defer fw.Close()
+	for _, d := range block {
+		if err = pw.Write(d); err != nil {
+			return err
+		}
+	}
+	if err = pw.WriteStop(); err != nil {
+		return err
+	}
+	u, err := readParquet(int64(len(block)))
+	for _, vv := range u {
+		fmt.Println(vv)
+	}
+	if err != nil {
+		return err
+	} else {
+		if SlicesEqual(u, block) {
+			fmt.Println("Writing done succesfully both same")
+		} else {
+			fmt.Println("Blocks unequal")
+		}
+	}
+	return nil
+}
+func readParquet(recordNumber int64) ([]*TSDB, error) {
+	fr, err := local.NewLocalFileReader("output.parquet")
+	if err != nil {
+		return nil, err
+	}
+	pr, err := reader.NewParquetReader(fr, new(TSDB), recordNumber)
+	if err != nil {
+		return nil, err
+	}
+	u := make([]*TSDB, recordNumber)
+	if err = pr.Read(&u); err != nil {
+		return nil, err
+	}
+	pr.ReadStop()
+	fr.Close()
+	return u, nil
+}
 func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error) {
 	db, err := tsdb.OpenDBReadOnly(path, nil)
 	if err != nil {
@@ -67,8 +140,8 @@ func readTsdb(path string, blockID string) error {
 	if err != nil {
 		return err
 	}
-
-	writer := parquet.NewWriter(file)
+	var block []*TSDB
+	writer := parquet1.NewWriter(file)
 
 	for sset.Next() {
 		series := sset.At()
@@ -81,6 +154,7 @@ func readTsdb(path string, blockID string) error {
 				Time:  ts,
 				Label: lbs,
 			}
+			block = append(block, &tsdb)
 			//fmt.Println(tsdb)
 			if err := writer.Write(tsdb); err != nil {
 				return err
@@ -90,6 +164,7 @@ func readTsdb(path string, blockID string) error {
 			return sset.Err()
 		}
 	}
+	generateParquet(block)
 	return nil
 }
 func main() {

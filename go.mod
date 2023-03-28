@@ -6,6 +6,8 @@ require github.com/segmentio/parquet-go v0.0.0-20230309140036-b6d0a6236da6
 
 require (
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137 // indirect
+	github.com/apache/arrow/go/arrow v0.0.0-20200730104253-651201b0f516 // indirect
+	github.com/apache/thrift v0.14.2 // indirect
 	github.com/aws/aws-sdk-go v1.44.217 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
@@ -30,6 +32,7 @@ require (
 	github.com/prometheus/common/sigv4 v0.1.0 // indirect
 	github.com/prometheus/procfs v0.9.0 // indirect
 	github.com/stretchr/testify v1.8.2 // indirect
+	github.com/xitongsys/parquet-go-source v0.0.0-20230312005205-fbbcdea5f512 // indirect
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/goleak v1.2.1 // indirect
 	golang.org/x/exp v0.0.0-20230307190834-24139beb5833 // indirect
@@ -37,6 +40,7 @@ require (
 	golang.org/x/oauth2 v0.6.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/text v0.8.0 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.29.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
@@ -52,5 +56,6 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.9 // indirect
 	github.com/prometheus/prometheus v0.43.0
 	github.com/segmentio/encoding v0.3.5 // indirect
+	github.com/xitongsys/parquet-go v1.6.2
 	golang.org/x/sys v0.6.0 // indirect
 )
