@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"os"
-	"sync"
 
 	"github.com/segmentio/parquet-go"
 
@@ -14,8 +14,6 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 )
-
-var wg sync.WaitGroup
 
 type TSDB struct {
 	Value float64 `parquet:"value"`
@@ -26,13 +24,10 @@ type TSDB struct {
 func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error) {
 	db, err := tsdb.OpenDBReadOnly(path, nil)
 	if err != nil {
-		fmt.Println("error at p1")
 		return nil, nil, err
 	}
 	blocks, err := db.Blocks()
 	if err != nil {
-
-		fmt.Println("error at p2")
 		return nil, nil, err
 	}
 	var block tsdb.BlockReader
@@ -47,17 +42,14 @@ func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error)
 		block = blocks[len(blocks)-1]
 	}
 	if block == nil {
-
-		fmt.Println("error at p3")
 		return nil, nil, fmt.Errorf("block %s not found", blockID)
 	}
 	return db, block, nil
 }
 func readTsdb(path string, blockID string) error {
 	db, _, err := openBlock(path, blockID)
+	defer db.Close()
 	if err != nil {
-
-		fmt.Println("error at p4")
 		return err
 	}
 	defer func() {
@@ -65,8 +57,6 @@ func readTsdb(path string, blockID string) error {
 	}()
 	q, err := db.Querier(context.Background(), math.MinInt64, math.MaxInt64)
 	if err != nil {
-
-		fmt.Println("error at p5")
 		return err
 	}
 	defer q.Close()
@@ -93,10 +83,8 @@ func readTsdb(path string, blockID string) error {
 				Time:  ts,
 				Label: lbs,
 			}
-			//fmt.Println(tsdb)
+			fmt.Println(tsdb)
 			if err := writer.Write(tsdb); err != nil {
-
-				fmt.Println("error at p7")
 				return err
 			}
 		}
@@ -105,8 +93,6 @@ func readTsdb(path string, blockID string) error {
 			return sset.Err()
 		}
 	}
-	defer db.Close()
-
 	return nil
 }
 func main() {
@@ -116,14 +102,13 @@ func main() {
 	path, err := os.Getwd()
 	fmt.Println(path)
 	if err != nil {
-		fmt.Println("error at p9")
+		log.Fatal(err)
 	}
 
 	blockId := "01GW1T7K3E9F9R361GDPVH8NZF"
 	//p := filepath.join(path, blockId)
 	//p := filepath.Join(path, blockId)
 	err = readTsdb(path, blockId)
-	wg.Wait()
 	if err == nil {
 		fmt.Println("Write Successful")
 	} else {
