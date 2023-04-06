@@ -6,12 +6,15 @@ import (
 	"log"
 	"math"
 	"os"
+	"strings"
 
-	parquet1 "github.com/segmentio/parquet-go"
-	"github.com/xitongsys/parquet-go-source/local"
-	"github.com/xitongsys/parquet-go/parquet"
-	"github.com/xitongsys/parquet-go/reader"
-	"github.com/xitongsys/parquet-go/writer"
+	"github.com/apache/arrow/go/arrow/memory"
+	"github.com/apache/arrow/go/v10/arrow"
+	"github.com/polarsignals/frostdb"
+	schemapb "github.com/polarsignals/frostdb/gen/proto/go/frostdb/schema/v1alpha1"
+	"github.com/polarsignals/frostdb/query"
+	"github.com/polarsignals/frostdb/query/logicalplan"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb"
@@ -19,81 +22,17 @@ import (
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 )
 
-type TSDB struct {
-	Value float64 `parquet:"name=value"`
-	Time  int64   `parquet:"name=time"`
-	Label string  `parquet:"name=label"`
+type Data struct {
+	Value float64
+	Time  int64
+	LABEL Labels
+}
+type Labels []Label
+
+type Label struct {
+	Name, Value string
 }
 
-func SlicesEqual(a, b []*TSDB) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i, v := range a {
-		if v != b[i] {
-			return false
-		} else {
-			fmt.Println(v, b[i])
-		}
-	}
-	return true
-}
-func generateParquet(block []*TSDB) error {
-	// using xitongsys library
-	log.Println("generating parquet file")
-	fw, err := local.NewLocalFileWriter("output.parquet")
-	fmt.Println(len(block))
-	if err != nil {
-		return err
-	}
-	//parameters: writer, type of struct, size
-	pw, err := writer.NewParquetWriter(fw, new(TSDB), int64(len(block)))
-	if err != nil {
-		return err
-	}
-	//compression type
-	pw.CompressionType = parquet.CompressionCodec_GZIP
-	defer fw.Close()
-	for _, d := range block {
-		if err = pw.Write(d); err != nil {
-			return err
-		}
-	}
-	if err = pw.WriteStop(); err != nil {
-		return err
-	}
-	u, err := readParquet(int64(len(block)))
-	for _, vv := range u {
-		fmt.Println(vv)
-	}
-	if err != nil {
-		return err
-	} else {
-		if SlicesEqual(u, block) {
-			fmt.Println("Writing done succesfully both same")
-		} else {
-			fmt.Println("Blocks unequal")
-		}
-	}
-	return nil
-}
-func readParquet(recordNumber int64) ([]*TSDB, error) {
-	fr, err := local.NewLocalFileReader("output.parquet")
-	if err != nil {
-		return nil, err
-	}
-	pr, err := reader.NewParquetReader(fr, new(TSDB), recordNumber)
-	if err != nil {
-		return nil, err
-	}
-	u := make([]*TSDB, recordNumber)
-	if err = pr.Read(&u); err != nil {
-		return nil, err
-	}
-	pr.ReadStop()
-	fr.Close()
-	return u, nil
-}
 func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error) {
 	db, err := tsdb.OpenDBReadOnly(path, nil)
 	if err != nil {
@@ -119,6 +58,40 @@ func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error)
 	}
 	return db, block, nil
 }
+func simpleSchema() proto.Message {
+	return &schemapb.Schema{
+		Name: "simple_schema",
+		Columns: []*schemapb.Column{{
+			Name: "value",
+			StorageLayout: &schemapb.StorageLayout{
+				Type: schemapb.StorageLayout_TYPE_DOUBLE,
+			},
+			Dynamic: false,
+		}, {
+			Name: "time",
+			StorageLayout: &schemapb.StorageLayout{
+				Type: schemapb.StorageLayout_TYPE_INT64,
+			},
+			Dynamic: false,
+		}, {
+			Name: "label",
+			StorageLayout: &schemapb.StorageLayout{
+				Type:     schemapb.StorageLayout_TYPE_STRING,
+				Encoding: schemapb.StorageLayout_ENCODING_RLE_DICTIONARY,
+				Nullable: true,
+			},
+			Dynamic: true,
+		}},
+		SortingColumns: []*schemapb.SortingColumn{{
+			Name:      "time",
+			Direction: schemapb.SortingColumn_DIRECTION_ASCENDING,
+		}, {
+			Name:       "label",
+			NullsFirst: true,
+			Direction:  schemapb.SortingColumn_DIRECTION_ASCENDING,
+		}},
+	}
+}
 func readTsdb(path string, blockID string) error {
 	db, _, err := openBlock(path, blockID)
 	if err != nil {
@@ -136,27 +109,51 @@ func readTsdb(path string, blockID string) error {
 
 	sset := q.Select(false, nil, labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".+"))
 
-	file, err := os.Create("../output_tsdb.parquet")
+	// Create a new column store
+	columnstore, err := frostdb.New()
 	if err != nil {
 		return err
 	}
-	var block []*TSDB
-	writer := parquet1.NewWriter(file)
+	defer columnstore.Close()
 
+	// Open up a database in the column store
+	database, err := columnstore.DB(context.Background(), "simple_db")
+	if err != nil {
+		return err
+	}
+	// Define our simple schema of labels and values
+	schema := simpleSchema()
+
+	// Create a table named simple in our database
+	table, err := database.Table(
+		"tsdb_table",
+		frostdb.NewTableConfig(schema),
+	)
+	if err != nil {
+		return err
+	}
 	for sset.Next() {
 		series := sset.At()
-		lbs := series.Labels().String()
+		lbs := series.Labels()
+		l := make([]Label, 0)
+		for _, v := range lbs {
+			r1 := strings.Split(fmt.Sprint(v), " ")
+			l = append(l, Label{Name: r1[0], Value: r1[1]})
+		}
+		//res, err := convertLabelsToString(m1)
+		//fmt.Println(jsonstr)
 		it := series.Iterator(nil)
 		for it.Next() == chunkenc.ValFloat {
 			ts, val := it.At()
-			tsdb := TSDB{
+			d := Data{
 				Value: val,
 				Time:  ts,
-				Label: lbs,
+				LABEL: l,
 			}
-			block = append(block, &tsdb)
-			//fmt.Println(tsdb)
-			if err := writer.Write(tsdb); err != nil {
+			_, err = table.Write(context.Background(), d)
+			if err != nil {
+				fmt.Println(d)
+				fmt.Println(err)
 				return err
 			}
 		}
@@ -164,26 +161,33 @@ func readTsdb(path string, blockID string) error {
 			return sset.Err()
 		}
 	}
-	generateParquet(block)
+	fmt.Println("Write succesfull")
+	// Create a new query engine to retrieve data and print the results
+	engine := query.NewEngine(memory.DefaultAllocator, database.TableProvider())
+	_ = engine.ScanTable("tsdb_table").
+		Project(logicalplan.DynCol("label")). // We don't know all dynamic columns at query time, but we want all of them to be returned.
+		Filter(
+			logicalplan.Col("label").Eq(logicalplan.Literal("job prometheus")),
+		).Execute(context.Background(), func(ctx context.Context, r arrow.Record) error {
+		fmt.Println(r)
+		return nil
+	})
 	return nil
 }
 func main() {
 
-	//fname := "./hello.go"
-	//path, err := filepath.Abs(fname)
 	path, err := os.Getwd()
-	//fmt.Println(path)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	blockId := "01GW1T7K3E9F9R361GDPVH8NZF"
-	//p := filepath.join(path, blockId)
-	//p := filepath.Join(path, blockId)
 	err = readTsdb(path, blockId)
 	if err == nil {
 		fmt.Println("Write Successful")
 	} else {
+		fmt.Println("error")
 		fmt.Println(err)
 	}
+
 }
