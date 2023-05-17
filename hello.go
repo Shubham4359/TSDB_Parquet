@@ -6,31 +6,23 @@ import (
 	"log"
 	"math"
 	"os"
-	"sort"
 	"strings"
 
-	"github.com/apache/arrow/go/arrow/array"
 	"github.com/apache/arrow/go/v10/arrow"
 	"github.com/dustin/go-humanize"
 	"github.com/olekukonko/tablewriter"
 	schemapb "github.com/polarsignals/frostdb/gen/proto/go/frostdb/schema/v1alpha1"
-	"github.com/polarsignals/frostdb/pqarrow"
 	"github.com/polarsignals/frostdb/query"
 	"github.com/polarsignals/frostdb/query/logicalplan"
 	"github.com/segmentio/parquet-go"
 	"google.golang.org/protobuf/proto"
 
-	frost "github.com/polarsignals/frostdb"
+	"github.com/apache/arrow/go/v10/arrow/memory"
+	"github.com/polarsignals/frostdb"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
-	"github.com/prometheus/prometheus/tsdb/chunks"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
-	"github.com/prometheus/prometheus/tsdb/index"
-
-	"github.com/apache/arrow/go/v10/arrow/memory"
-	"github.com/polarsignals/frostdb"
-	"github.com/thanos-io/objstore/providers/filesystem"
 )
 
 type Data struct {
@@ -38,9 +30,9 @@ type Data struct {
 	Time  int64
 	LABEL Labels
 }
-type Labels []Label
+type Labels []LabelColumn
 
-type Label struct {
+type LabelColumn struct {
 	Name, Value string
 }
 
@@ -120,13 +112,17 @@ func simpleSchema() proto.Message {
 		Columns: []*schemapb.Column{{
 			Name: "value",
 			StorageLayout: &schemapb.StorageLayout{
-				Type: schemapb.StorageLayout_TYPE_DOUBLE,
+				Type:        schemapb.StorageLayout_TYPE_DOUBLE,
+				Encoding:    schemapb.StorageLayout_ENCODING_PLAIN_UNSPECIFIED,
+				Compression: schemapb.StorageLayout_COMPRESSION_SNAPPY,
 			},
 			Dynamic: false,
 		}, {
 			Name: "time",
 			StorageLayout: &schemapb.StorageLayout{
-				Type: schemapb.StorageLayout_TYPE_INT64,
+				Type:        schemapb.StorageLayout_TYPE_INT64,
+				Encoding:    schemapb.StorageLayout_ENCODING_DELTA_BINARY_PACKED,
+				Compression: schemapb.StorageLayout_COMPRESSION_SNAPPY,
 			},
 			Dynamic: false,
 		}, {
@@ -149,121 +145,138 @@ func simpleSchema() proto.Message {
 	}
 }
 
-func convertBlockFrostDB_single_push(path, blockID string) error {
-	tsdb, block, err := openBlock(path, blockID)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		tsdb_errors.NewMulti(err, tsdb.Close()).Err()
-	}()
-
-	ir, err := block.Index()
-	if err != nil {
-		return err
-	}
-	defer ir.Close()
-
-	postingsr, err := ir.Postings(index.AllPostingsKey())
-	if err != nil {
-		return err
-	}
-	chunkr, err := block.Chunks()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		err = tsdb_errors.NewMulti(err, chunkr.Close()).Err()
-	}()
-
-	// FrostDB
-
-	bucket, err := filesystem.NewBucket("data-promtool")
-	if err != nil {
-		return err
-	}
-	store, err := frostdb.New(
-		frostdb.WithBucketStorage(bucket),
-	)
-	if err != nil {
-		return err
-	}
-	db, err := store.DB(context.Background(), "prometheus")
-	if err != nil {
-		return err
-	}
-	tableSchema := simpleSchema()
-
-	table, err := db.Table(
-		"tsdb_table",
-		frostdb.NewTableConfig(tableSchema),
-	)
-	if err != nil {
-		return err
-	}
-	ctx := context.Background()
-	as, err := pqarrow.ParquetSchemaToArrowSchema(ctx, table.Schema().ParquetSchema(), logicalplan.IterOptions{})
-	chks := []chunks.Meta{}
-	builder := labels.ScratchBuilder{}
-
-	labelNamesMap := map[string]struct{}{}
-	for postingsr.Next() {
-		if err := ir.Series(postingsr.At(), &builder, &chks); err != nil {
-			return err
+//	func convertBlockFrostDB_single_push(path, blockID string) error {
+//		tsdb, block, err := openBlock(path, blockID)
+//		if err != nil {
+//			return err
+//		}
+//		defer func() {
+//			tsdb_errors.NewMulti(err, tsdb.Close()).Err()
+//		}()
+//
+//		ir, err := block.Index()
+//		if err != nil {
+//			return err
+//		}
+//		defer ir.Close()
+//
+//		postingsr, err := ir.Postings(index.AllPostingsKey())
+//		if err != nil {
+//			return err
+//		}
+//		chunkr, err := block.Chunks()
+//		if err != nil {
+//			return err
+//		}
+//		defer func() {
+//			err = tsdb_errors.NewMulti(err, chunkr.Close()).Err()
+//		}()
+//
+//		// FrostDB
+//
+//		bucket, err := filesystem.NewBucket("data-promtool")
+//		if err != nil {
+//			return err
+//		}
+//		store, err := frostdb.New(
+//			frostdb.WithBucketStorage(bucket),
+//		)
+//		if err != nil {
+//			return err
+//		}
+//		db, err := store.DB(context.Background(), "prometheus")
+//		if err != nil {
+//			return err
+//		}
+//		tableSchema := simpleSchema()
+//
+//		table, err := db.Table(
+//			"tsdb_table",
+//			frostdb.NewTableConfig(tableSchema),
+//		)
+//		if err != nil {
+//			return err
+//		}
+//		ctx := context.Background()
+//		as, err := pqarrow.ParquetSchemaToArrowSchema(ctx, table.Schema().ParquetSchema(), logicalplan.IterOptions{})
+//		chks := []chunks.Meta{}
+//		builder := labels.ScratchBuilder{}
+//
+//		labelNamesMap := map[string]struct{}{}
+//		for postingsr.Next() {
+//			if err := ir.Series(postingsr.At(), &builder, &chks); err != nil {
+//				return err
+//			}
+//			for name := range builder.Labels().Map() {
+//				labelNamesMap[name] = struct{}{}
+//			}
+//		}
+//		if postingsr.Err() != nil {
+//			return postingsr.Err()
+//		}
+//
+//		labelNames := make([]string, 0, len(labelNamesMap))
+//		for name := range labelNamesMap {
+//			labelNames = append(labelNames, name)
+//		}
+//		sort.Strings(labelNames)
+//		mem := memory.NewGoAllocator()
+//
+//		rb := array.NewRecordBuilder(mem, as)
+//
+//		// Reset the postings reader by creating a new one. Seek doesn't work.
+//		postingsr, err = ir.Postings(index.AllPostingsKey())
+//		if err != nil {
+//			return err
+//		}
+//		var it chunkenc.Iterator
+//		for postingsr.Next() {
+//			if err := ir.Series(postingsr.At(), &builder, &chks); err != nil {
+//				return err
+//			}
+//
+//			lset := builder.Labels()
+//
+//			for _, chk := range chks {
+//				chk, err := chunkr.Chunk(chk)
+//				if err != nil {
+//					return err
+//				}
+//
+//				it = chk.Iterator(it)
+//				for it.Next() == chunkenc.ValFloat {
+//					t, v := it.At()
+//					rb.Append(lset, t, v)
+//				}
+//			}
+//		}
+//
+//		r := rb.NewRecord()
+//		defer r.Release()
+//
+//		_, err = table.InsertRecord(context.Background(), r)
+//		if err != nil {
+//			return err
+//		}
+//
+//		return store.Close()
+//	}
+func promMatchersToFrostDBExprs(matchers []*labels.Matcher) logicalplan.Expr {
+	exprs := []logicalplan.Expr{}
+	for _, matcher := range matchers {
+		switch matcher.Type {
+		case labels.MatchEqual:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchNotEqual:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchRegexp:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexMatch(matcher.Value))
+		case labels.MatchNotRegexp:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexNotMatch(matcher.Value))
 		}
-		for name := range builder.Labels().Map() {
-			labelNamesMap[name] = struct{}{}
-		}
 	}
-	if postingsr.Err() != nil {
-		return postingsr.Err()
-	}
-
-	labelNames := make([]string, 0, len(labelNamesMap))
-	for name := range labelNamesMap {
-		labelNames = append(labelNames, name)
-	}
-	sort.Strings(labelNames)
-	mem := memory.NewGoAllocator()
-
-	rb := array.NewRecordBuilder(mem, as)
-
-	// Reset the postings reader by creating a new one. Seek doesn't work.
-	postingsr, err = ir.Postings(index.AllPostingsKey())
-	if err != nil {
-		return err
-	}
-	var it chunkenc.Iterator
-	for postingsr.Next() {
-		if err := ir.Series(postingsr.At(), &builder, &chks); err != nil {
-			return err
-		}
-
-		lset := builder.Labels()
-
-		for _, chk := range chks {
-			chk, err := chunkr.Chunk(chk)
-			if err != nil {
-				return err
-			}
-
-			it = chk.Iterator(it)
-			for it.Next() == chunkenc.ValFloat {
-				t, v := it.At()
-				rb.Append(lset, t, v)
-			}
-		}
-	}
-
-	r := rb.NewRecord()
-	defer r.Release()
-
-	_, err = table.InsertRecord(context.Background(), r)
-	if err != nil {
-		return err
-	}
-
-	return store.Close()
+	fmt.Println(exprs)
+	return logicalplan.And(exprs...)
 }
 func readTsdb(path string, blockID string) error {
 	db, _, err := openBlock(path, blockID)
@@ -271,7 +284,7 @@ func readTsdb(path string, blockID string) error {
 		return err
 	}
 	defer db.Close()
-	bucket, err := filesystem.NewBucket(path)
+	//bucket, err := filesystem.NewBucket(path)
 	if err != nil {
 		return err
 	}
@@ -283,14 +296,13 @@ func readTsdb(path string, blockID string) error {
 		return err
 	}
 	defer q.Close()
-
-	sset := q.Select(false, nil, labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".+"))
+	sset := q.Select(true, nil, labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".+"))
 	ctx := context.Background()
 	// Create a new column store
 	columnstore, err := frostdb.New(
-		frost.WithWAL(),
-		frost.WithStoragePath(path),
-		frost.WithBucketStorage(bucket),
+	//frost.WithWAL(),
+	//frost.WithStoragePath(path),
+	//frost.WithBucketStorage(bucket),
 	)
 	if err != nil {
 		return err
@@ -313,48 +325,77 @@ func readTsdb(path string, blockID string) error {
 	if err != nil {
 		return err
 	}
+	pqLbls := make([]LabelColumn, 0, 10)
+	rows := make([]any, 0, 1000)
 	for sset.Next() {
+		rows = rows[:0]
+		pqLbls = pqLbls[:0]
+
 		series := sset.At()
 		lbs := series.Labels()
-		l := make([]Label, 0)
-		for _, v := range lbs {
-			r1 := strings.Split(fmt.Sprint(v), " ")
-			l = append(l, Label{Name: r1[0], Value: r1[1]})
-		}
-		//res, err := convertLabelsToString(m1)
-		//fmt.Println(jsonstr)
+		lbs.Range(func(l labels.Label) {
+			pqLbls = append(pqLbls, LabelColumn{Name: l.Name, Value: l.Value})
+		})
+		//fmt.Println(pqLbls)
 		it := series.Iterator(nil)
 		for it.Next() == chunkenc.ValFloat {
 			ts, val := it.At()
-			d := Data{
+			rows = append(rows, Data{
 				Value: val,
 				Time:  ts,
-				LABEL: l,
-			}
-			_, err = table.Write(context.Background(), d)
-			if err != nil {
-				fmt.Println(d)
-				fmt.Println(err)
-				return err
-			}
+				LABEL: pqLbls,
+			})
 		}
+		//fmt.Println("Writing to table")
+		_, err = table.Write(context.Background(), rows...)
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+
 		if it.Err() != nil {
 			return sset.Err()
 		}
 	}
 	fmt.Println("Write succesfull")
-	table.ActiveBlock().Persist()
+	//table.ActiveBlock().Persist()
 	//
 	// Create a new query engine to retrieve data and print the results
 	engine := query.NewEngine(memory.DefaultAllocator, database.TableProvider())
-	_ = engine.ScanTable("tsdb_table").
-		Project(logicalplan.DynCol("label")). // We don't know all dynamic columns at query time, but we want all of them to be returned.
-		Filter(
-			logicalplan.Col("label.job").Eq(logicalplan.Literal("prometheus")),
+	sets := map[string]struct{}{}
+	start := math.MinInt64
+	end := math.MaxInt64
+	matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "up"), labels.MustNewMatcher(labels.MatchEqual, "instance", "localhost:9090"), labels.MustNewMatcher(labels.MatchEqual, "job", "prometheus")}
+	err1 := engine.ScanTable("tsdb_table").
+		Filter(logicalplan.And(
+			logicalplan.And(
+				logicalplan.Col("time").Gt(logicalplan.Literal(start)),
+				logicalplan.Col("time").Lt(logicalplan.Literal(end)),
+			),
+			promMatchersToFrostDBExprs(matchers),
+		)).
+		Project(
+			logicalplan.DynCol("labels"),
+			logicalplan.Col("time"),
+			logicalplan.Col("value"),
 		).Execute(context.Background(), func(ctx context.Context, r arrow.Record) error {
 		fmt.Println(r)
+		defer r.Release()
+		for i := 0; i < int(r.NumCols()); i++ {
+			fmt.Println(r.ColumnName(i))
+			sets[r.ColumnName(i)] = struct{}{}
+		}
 		return nil
 	})
+	if err1 != nil {
+		fmt.Printf(" failed to perform labels query: %s", err1)
+	}
+
+	names := []string{}
+	for s := range sets {
+		names = append(names, strings.TrimPrefix(s, "labels."))
+	}
+	fmt.Println(names)
 	return nil
 }
 func main() {
