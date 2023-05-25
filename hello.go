@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/apache/arrow/go/arrow/array"
 	"github.com/apache/arrow/go/v10/arrow"
 	"github.com/dustin/go-humanize"
 	"github.com/olekukonko/tablewriter"
@@ -34,6 +35,16 @@ type Labels []LabelColumn
 
 type LabelColumn struct {
 	Name, Value string
+}
+
+type series struct {
+	l  labels.Labels
+	ts []int64
+	v  []float64
+}
+type arrowSeriesSet struct {
+	index int
+	sets  []*series
 }
 
 func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error) {
@@ -261,6 +272,33 @@ func simpleSchema() proto.Message {
 //
 //		return store.Close()
 //	}
+
+func DictionaryFromRecord(ar arrow.Record, name string) (*array.Dictionary, error) {
+	indices := ar.Schema().FieldIndices(name)
+	if len(indices) != 1 {
+		return nil, fmt.Errorf("expected 1 column named %q, got %d", name, len(indices))
+	}
+
+	col, ok := ar.Column(indices[0]).(*array.Dictionary)
+	if !ok {
+		return nil, fmt.Errorf("expected column %q to be a dictionary column, got %T", name, ar.Column(indices[0]))
+	}
+
+	return col, nil
+}
+
+func StringValueFromDictionary(arr *array.Dictionary, i int) string {
+	switch dict := arr.Dictionary().(type) {
+	case *array.Binary:
+		return string(dict.Value(arr.GetValueIndex(i)))
+	case *array.String:
+		return dict.Value(arr.GetValueIndex(i))
+	default:
+		panic(fmt.Sprintf("unsupported dictionary type: %T", dict))
+	}
+	return ""
+}
+
 func promMatchersToFrostDBExprs(matchers []*labels.Matcher) logicalplan.Expr {
 	exprs := []logicalplan.Expr{}
 	for _, matcher := range matchers {
@@ -277,6 +315,116 @@ func promMatchersToFrostDBExprs(matchers []*labels.Matcher) logicalplan.Expr {
 	}
 	fmt.Println(exprs)
 	return logicalplan.And(exprs...)
+}
+func parseRecord(r arrow.Record) map[uint64]*series {
+	seriesset := map[uint64]*series{}
+
+	for i := 0; i < int(r.NumRows()); i++ {
+		lbls := labels.Labels{}
+		var ts int64
+		var v float64
+		for j := 0; j < int(r.NumCols()); j++ {
+			columnName := r.ColumnName(j)
+			switch {
+			case columnName == "time":
+				ts = r.Column(j).(*array.Int64).Value(i)
+			case columnName == "value":
+				v = r.Column(j).(*array.Float64).Value(i)
+			default:
+				name := strings.TrimPrefix(columnName, "labels.")
+				nameColumn, err := DictionaryFromRecord(r, columnName)
+				if err != nil {
+					continue
+				}
+				if nameColumn.IsNull(i) {
+					continue
+				}
+
+				value := StringValueFromDictionary(nameColumn, i)
+				if string(value) != "" {
+					lbls = append(lbls, labels.Label{
+						Name:  name,
+						Value: value,
+					})
+				}
+			}
+		}
+		h := lbls.Hash()
+		if es, ok := seriesset[h]; ok {
+			es.ts = append(es.ts, ts)
+			es.v = append(es.v, v)
+		} else {
+			seriesset[h] = &series{
+				ts: []int64{ts},
+				v:  []float64{v},
+				l:  lbls,
+			}
+		}
+	}
+
+	return seriesset
+}
+func flattenSeriesSets(sets map[uint64]*series) *arrowSeriesSet {
+	// Flatten sets
+	ss := []*series{}
+	for _, s := range sets {
+		ss = append(ss, s)
+	}
+
+	return &arrowSeriesSet{
+		index: -1,
+		sets:  ss,
+	}
+}
+
+func merge(a, b []int64, af, bf []float64) ([]int64, []float64) {
+
+	ai := 0
+	bi := 0
+
+	result := []int64{}
+	floats := []float64{}
+	for {
+		av := int64(math.MaxInt64)
+		bv := int64(math.MaxInt64)
+
+		if ai < len(a) {
+			av = a[ai]
+		}
+
+		if bi < len(b) {
+			bv = b[bi]
+		}
+
+		if av == math.MaxInt64 && bv == math.MaxInt64 {
+			return result, floats
+		}
+
+		var min int64
+		var f float64
+		switch {
+		case av <= bv:
+			min = av
+			f = af[ai]
+			ai++
+		default:
+			min = bv
+			f = bf[bi]
+			bi++
+		}
+		result = append(result, min)
+		floats = append(floats, f)
+	}
+}
+func parseRecordIntoSeriesSet(ar arrow.Record, sets map[uint64]*series) {
+	seriesset := parseRecord(ar)
+	for id, set := range seriesset {
+		if s, ok := sets[id]; ok {
+			s.ts, s.v = merge(s.ts, set.ts, s.v, set.v)
+		} else {
+			sets[id] = set
+		}
+	}
 }
 func readTsdb(path string, blockID string) error {
 	db, _, err := openBlock(path, blockID)
@@ -362,9 +510,9 @@ func readTsdb(path string, blockID string) error {
 	//
 	// Create a new query engine to retrieve data and print the results
 	engine := query.NewEngine(memory.DefaultAllocator, database.TableProvider())
-	sets := map[string]struct{}{}
 	start := math.MinInt64
 	end := math.MaxInt64
+	sets := map[uint64]*series{}
 	matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "up"), labels.MustNewMatcher(labels.MatchEqual, "instance", "localhost:9090"), labels.MustNewMatcher(labels.MatchEqual, "job", "prometheus")}
 	err1 := engine.ScanTable("tsdb_table").
 		Filter(logicalplan.And(
@@ -379,23 +527,14 @@ func readTsdb(path string, blockID string) error {
 			logicalplan.Col("time"),
 			logicalplan.Col("value"),
 		).Execute(context.Background(), func(ctx context.Context, r arrow.Record) error {
-		fmt.Println(r)
 		defer r.Release()
-		for i := 0; i < int(r.NumCols()); i++ {
-			fmt.Println(r.ColumnName(i))
-			sets[r.ColumnName(i)] = struct{}{}
-		}
+		parseRecordIntoSeriesSet(r, sets)
 		return nil
 	})
 	if err1 != nil {
-		fmt.Printf(" failed to perform labels query: %s", err1)
+		fmt.Println("error: ", err1)
 	}
-
-	names := []string{}
-	for s := range sets {
-		names = append(names, strings.TrimPrefix(s, "labels."))
-	}
-	fmt.Println(names)
+	fmt.Println(flattenSeriesSets(sets))
 	return nil
 }
 func main() {
