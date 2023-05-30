@@ -445,6 +445,7 @@ func readTsdb(path string, blockID string) error {
 	}
 	defer q.Close()
 	sset := q.Select(true, nil, labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".+"))
+	//bucket, err := filesystem.NewBucket(path)
 	ctx := context.Background()
 	// Create a new column store
 	columnstore, err := frostdb.New(
