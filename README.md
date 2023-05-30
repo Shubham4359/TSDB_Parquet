@@ -1,4 +1,4 @@
-# LFX Mentorship - Thanos
+# LFX Mentorship'23 @CNCF:Thanos
 Link to issue :- https://github.com/thanos-io/promql-engine/issues/167
 
 # Why are we doing this conversion
