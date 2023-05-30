@@ -110,3 +110,30 @@ https://github.com/polarsignals/frostdb/blob/main/cmd/parquet-tool/main.go
 go run cmd/parquet-tool/main.go <path-parquet-file>
 ```
 Post this you can analyse the parquet files properties like Size, labels, encoding, compression,etc.
+
+# Querier
+Currently still working on making querier generic.
+Here we can set some labels and provide a start and end time between that all timeseries data will be given as output.
+Also we can pick any matchers according to our need.
+Example of Labels can look like
+```
+matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "up"), labels.MustNewMatcher(labels.MatchEqual, "instance", "localhost:9090"), labels.MustNewMatcher(labels.MatchEqual, "job", "prometheus")}
+```
+Different Matchers Considered are 
+```
+ * MatchEqual
+ * MatchNotEqual
+ * MatchRegexp  
+ * MatchNotRegexp
+```
+
+Post this choose the Start and End time and run querier function
+Important to note that while taking projections make Label as Dynamic Column and Rest two columns(time and value) as normal column.
+
+# Running 
+To Run this repositry we can use
+```
+go run hello.go
+```
+
+Note:- Currently I have commented the code for persistance and visualisation as working upon making the querier genric.
