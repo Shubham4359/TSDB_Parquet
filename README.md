@@ -1,11 +1,9 @@
 <div align="center">
-<img src="LFX Mentorship'23 @CNCF:Thanos" height= "auto" width="200" />
-<br />
-<img src="assets/lfx-2021-2.webp" height= "auto" width="200" />
-<br />
-<h1></h1>
+<h1>
+LFX Mentorship'23 @CNCF:Thanos
+</h1>
 <h3>
-Cloud native measurement, reporting and validation of carbon emissions
+Research querying Apache Parquet files	
 </h3>
 </div>
 
