@@ -57,3 +57,56 @@ func simpleSchema() proto.Message {
 	}
 }
 ```
+
+With this schema, all rows are expected to have a `time` and a `value` but can vary in their columns prefixed with `label.`. In this schema all dynamically created columns are still Dictionary and run-length encoded and must be of type `string` as seen from type and encoding.
+Here sorting is done on the basis of time stamp in ascending order.
+Value and time column are not dynamic in nature as they are present in each series.
+
+# Analysing Parquet Files
+
+To analyse Parquet files being formed corresponding to the TSDB block we have to use persistance for analysis.
+Given that you know the path of TSDB block
+You can create a frostdb table using below snippet.
+```
+        bucket, err := filesystem.NewBucket(path)
+	ctx := context.Background()
+	// Create a new column store
+	columnstore, err := frostdb.New(
+	frost.WithWAL(),
+	frost.WithStoragePath(path),
+	frost.WithBucketStorage(bucket),
+	)
+	if err != nil {
+		return err
+	}
+	defer columnstore.Close()
+
+	// Open up a database in the column store
+	database, err := columnstore.DB(ctx, "simple_db")
+	if err != nil {
+		return err
+	}
+	// Define our simple schema of labels and values
+	schema := simpleSchema()
+
+	// Create a table named tsdb_table in our database
+	table, err := database.Table(
+		"tsdb_table",
+		frostdb.NewTableConfig(schema),
+	)
+	if err != nil {
+		return err
+	}
+```
+Now according to schema append the values in table.
+Once done with that persist the table and you will have a output parquet file which you can then analyse.
+```
+table.ActiveBlock().Persist()
+```
+Now to analyse the parquet file we can run the below binary and point our parquet file to that.
+https://github.com/polarsignals/frostdb/blob/main/cmd/parquet-tool/main.go
+
+```
+go run cmd/parquet-tool/main.go <path-parquet-file>
+```
+Post this you can analyse the parquet files properties like Size, labels, encoding, compression,etc.
