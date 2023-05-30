@@ -5,9 +5,10 @@ LFX Mentorship'23 @CNCF:Thanos
 <h3>
 Research querying Apache Parquet files	
 </h3>
-</div>
-
+<h3>
 Link to issue :- https://github.com/thanos-io/promql-engine/issues/167
+</h3>
+</div>
 
 # Why are we doing this conversion
 Columnar data stores have become incredibly popular for analytics. Structuring data in columns instead of rows leverages the architecture of modern hardware, allowing for efficient processing of data. A columnar data store might be right for you if you have workloads where you write a lot of data and need to perform analytics on that data.
